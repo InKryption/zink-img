@@ -1,6 +1,10 @@
 const std = @import("std");
 pub const png = @import("png.zig");
 
+comptime {
+    _ = png;
+}
+
 const HalfUsize = std.meta.Int(
     .unsigned,
     @divExact(@typeInfo(usize).Int.bits, 2),
@@ -75,6 +79,3 @@ pub const Image = struct {
         return @as(FullUsize, x) + mulHalfUsize(img.w, y);
     }
 };
-
-test {
-}

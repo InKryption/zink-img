@@ -5,7 +5,7 @@ const std = @import("std");
 pub fn ErrorSetFromValue(comptime err: anyerror) type {
     const Type = std.builtin.Type;
     return @Type(Type{
-        .ErrorSet = &[_]Type.Error{err},
+        .ErrorSet = &[_]Type.Error{.{ .name = @errorName(err) }},
     });
 }
 
