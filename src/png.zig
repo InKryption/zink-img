@@ -355,6 +355,7 @@ pub fn ChunkDataStream(comptime ReaderType: type) type {
                 .awaiting_data => |header| header,
                 .end => unreachable,
             };
+            std.debug.assert(intermediate_buffer.len > 0 or header.length == 0);
 
             self.state = .end;
             return switch (util.readIntoWriterEagerlyWithBuffer(writer, self.reader, header.length, intermediate_buffer)) {
@@ -400,6 +401,29 @@ pub fn ChunkDataStream(comptime ReaderType: type) type {
         }
     };
 }
+
+pub const ChunkIHDR = struct {
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    color_type: u8,
+    compression_method: u8,
+    filter_method: u8,
+    interlace_method: u8,
+
+    pub fn parseBytes(bytes: *const [@sizeOf(ChunkIHDR)]u8) ChunkIHDR {
+        var fbs = std.io.fixedBufferStream(bytes);
+        return ChunkIHDR{
+            .width = fbs.reader().readIntBig(u32) catch unreachable,
+            .height = fbs.reader().readIntBig(u32) catch unreachable,
+            .bit_depth = fbs.reader().readIntBig(u8) catch unreachable,
+            .color_type = fbs.reader().readIntBig(u8) catch unreachable,
+            .compression_method = fbs.reader().readIntBig(u8) catch unreachable,
+            .filter_method = fbs.reader().readIntBig(u8) catch unreachable,
+            .interlace_method = fbs.reader().readIntBig(u8) catch unreachable,
+        };
+    }
+};
 
 test {
     const data = @embedFile("img1.png");

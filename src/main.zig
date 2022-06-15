@@ -79,3 +79,53 @@ pub const Image = struct {
         return @as(FullUsize, x) + mulHalfUsize(img.w, y);
     }
 };
+
+pub fn loadPngBuffered(
+    allocator: std.mem.Allocator,
+    reader: anytype,
+    intermediate_buf: []u8,
+) !Image {
+    _ = allocator;
+    std.debug.assert(intermediate_buf.len > 0);
+
+    var chunk_stream = png.chunkDataStream(reader);
+    try chunk_stream.start().unwrap();
+
+    const ihdr: png.ChunkIHDR = ihdr: {
+        const header = try (chunk_stream.nextHeader() orelse return error.NoData).unwrap();
+        if (header.type != .IHDR) {
+            return error.MissingIHDRChunk;
+        }
+
+        var ihdr_buf: [@sizeOf(png.ChunkIHDR)]u8 = undefined;
+        var ihdr_buf_stream = std.io.fixedBufferStream(&ihdr_buf);
+        const crc = try chunk_stream.streamDataWithBuffer(ihdr_buf_stream.writer(), intermediate_buf).unwrap();
+
+        var crc_hasher = std.hash.Crc32.init();
+        crc_hasher.update(&std.mem.toBytes(header.type.intBig()));
+        crc_hasher.update(&ihdr_buf);
+        if (crc_hasher.final() != crc) {
+            return error.CrcMismatch;
+        }
+
+        break :ihdr png.ChunkIHDR.parseBytes(&ihdr_buf);
+    };
+    _ = ihdr;
+
+    while (chunk_stream.nextHeader()) |maybe_header| {
+        const header = try maybe_header.unwrap();
+        switch (header.type) {
+            .IEND => {
+                var empty_buf: [1]u8 = undefined;
+                var empty_stream = std.io.fixedBufferStream(empty_buf[0..0]);
+                const crc = chunk_stream.streamDataWithBuffer(empty_stream.writer(), &empty_buf);
+                if (crc != std.hash.Crc32.hash(&std.mem.toBytes(header.type.intBig()))) {
+                    return error.CrcMismatch;
+                }
+                break;
+            },
+        }
+    }
+
+    return std.debug.todo("");
+}
