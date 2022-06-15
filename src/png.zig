@@ -407,9 +407,6 @@ test {
 
     var chunk_data_stream = chunkDataStream(data_stream.reader());
 
-    var intermediate_buf_cache = std.ArrayList(u8).init(std.testing.allocator);
-    defer intermediate_buf_cache.deinit();
-
     var raw_data_list = std.ArrayList(u8).init(std.testing.allocator);
     defer raw_data_list.deinit();
 
@@ -417,10 +414,9 @@ test {
     while (chunk_data_stream.nextHeader()) |maybe_header| {
         const header = try maybe_header.unwrap();
 
-        try intermediate_buf_cache.resize(header.length);
-
+        var intermediate_buf: [128]u8 = undefined;
         const current_chunk_start = raw_data_list.items.len;
-        const crc = try chunk_data_stream.streamDataWithBuffer(raw_data_list.writer(), intermediate_buf_cache.items).unwrap();
+        const crc = try chunk_data_stream.streamDataWithBuffer(raw_data_list.writer(), &intermediate_buf).unwrap();
 
         var crc_hasher = std.hash.Crc32.init();
         crc_hasher.update(&std.mem.toBytes(header.type.intBig()));
