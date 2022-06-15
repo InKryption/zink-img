@@ -24,8 +24,8 @@ pub fn CheckReaderForPngSignatureResult(comptime ErrorSet: type) type {
         }
     };
 }
-pub fn checkReaderForPngSignature(reader: anytype) CheckReaderForPngSignatureResult(util.MemoizeErrorSet(@TypeOf(reader).Error)) {
-    const Result = CheckReaderForPngSignatureResult(util.MemoizeErrorSet(@TypeOf(reader).Error));
+pub fn checkReaderForPngSignature(reader: anytype) CheckReaderForPngSignatureResult(@TypeOf(reader).Error) {
+    const Result = CheckReaderForPngSignatureResult(@TypeOf(reader).Error);
 
     switch (util.readBoundedArrayExtra(reader, signature.len)) {
         .ok => |bytes| switch (bytes.len) {
@@ -158,7 +158,7 @@ pub const ChunkHeader = struct {
 
             const naive_value = std.mem.readIntBig(u32, &length_bytes);
             if (std.math.cast(u31, naive_value)) |casted| break :length casted;
-            return Result{ .invalid_length = Result.InvalidLength{ .value = naive_value } };
+            return Result{ .invalid_length = Result.InvalidLength{ .invalid_value = naive_value } };
         };
 
         const @"type": ChunkType = @"type": {
@@ -189,3 +189,242 @@ pub const ChunkMetadata = struct {
     header: ChunkHeader,
     crc: u32,
 };
+
+pub fn chunkDataStream(reader: anytype) ChunkDataStream(@TypeOf(reader)) {
+    return ChunkDataStream(@TypeOf(reader)).init(reader);
+}
+pub fn ChunkDataStream(comptime ReaderType: type) type {
+    return struct {
+        const Self = @This();
+        reader: ReaderType,
+        state: State,
+
+        const State = union(enum) {
+            begin,
+            awaiting_header,
+            awaiting_data: ChunkHeader,
+            end,
+        };
+
+        pub const ReadError = ReaderType.Error;
+
+        pub fn init(reader: ReaderType) Self {
+            return Self{
+                .reader = reader,
+                .state = .begin,
+            };
+        }
+
+        pub fn start(self: *Self) CheckReaderForPngSignatureResult(ReadError) {
+            switch (self.state) {
+                .begin => {},
+                .awaiting_header => unreachable,
+                .awaiting_data => unreachable,
+                .end => unreachable,
+            }
+
+            const check_result = checkReaderForPngSignature(self.reader);
+            self.state = switch (check_result) {
+                .ok => .awaiting_header,
+                .invalid_bytes => .end,
+                .insufficient_bytes => .end,
+                .read_failure => .end,
+            };
+            return check_result;
+        }
+
+        pub const NextHeaderResult = union(enum) {
+            ok: ChunkHeader,
+            no_type_err: ChunkHeader.ParseReaderResult(ReadError).NoTypeErr,
+            no_type_eos: ChunkHeader.ParseReaderResult(ReadError).NoTypeEos,
+            invalid_length: ChunkHeader.ParseReaderResult(ReadError).InvalidLength,
+            no_length_err: ChunkHeader.ParseReaderResult(ReadError).NoLengthErr,
+
+            pub fn unwrap(self: NextHeaderResult) error{ NoTypeErr, NoTypeEos, InvalidLength, NoLengthErr }!ChunkHeader {
+                return switch (self) {
+                    .ok => |header| header,
+                    .no_type_err => error.NoTypeErr,
+                    .no_type_eos => error.NoTypeEos,
+                    .invalid_length => error.InvalidLength,
+                    .no_length_err => error.NoLengthErr,
+                };
+            }
+        };
+        pub fn nextHeader(self: *Self) ?NextHeaderResult {
+            const Result = NextHeaderResult;
+            switch (self.state) {
+                .begin => unreachable,
+                .awaiting_header => {},
+                .awaiting_data => unreachable,
+                .end => return null,
+            }
+
+            const parse_result = ChunkHeader.parseReader(self.reader);
+
+            self.state = switch (parse_result) {
+                .ok => |header| State{ .awaiting_data = header },
+                else => .end,
+            };
+            return switch (parse_result) {
+                .ok => |header| Result{ .ok = header },
+                .no_type_err => |info| Result{ .no_type_err = info },
+                .no_type_eos => |info| Result{ .no_type_eos = info },
+                .invalid_length => |info| Result{ .invalid_length = info },
+                .no_length_err => |info| Result{ .no_length_err = info },
+                .no_length_eos => null,
+            };
+        }
+
+        pub fn StreamDataResult(comptime WriteError: type) type {
+            return union(enum) {
+                ok: Ok,
+
+                missing_crc_bytes_eos: MissingCrcBytesEos,
+                missing_crc_bytes_err: MissingCrcBytesErr,
+
+                data_write_fail: DataWriteFail,
+                data_read_partial: DataReadPartial,
+                data_read_partial_write_fail: DataReadPartialWriteFail,
+                data_read_fail: DataReadFail,
+                data_read_fail_write_fail: DataReadFailWriteFail,
+
+                pub const Ok = struct {
+                    crc: u32,
+                };
+                pub const MissingCrcBytesEos = struct {
+                    bytes: util.ReadBoundedArrayExtraResult(WriteError, 4).Fail.Bytes,
+                };
+                pub const MissingCrcBytesErr = util.ReadBoundedArrayExtraResult(ReadError, 4).Fail;
+                pub const DataWriteFail = struct {
+                    bytes_read: u31,
+                    bytes_written: u31,
+                    write_err: WriteError,
+                };
+                pub const DataReadPartial = struct {
+                    bytes_read: u31,
+                };
+                pub const DataReadPartialWriteFail = struct {
+                    bytes_read: u31,
+                    bytes_written: u31,
+                    write_err: WriteError,
+                };
+                pub const DataReadFail = struct {
+                    bytes_read: u31,
+                    read_err: ReadError,
+                };
+                pub const DataReadFailWriteFail = struct {
+                    bytes_read: u31,
+                    bytes_written: u31,
+                    read_err: ReadError,
+                    write_err: WriteError,
+                };
+
+                pub const UnwrapError = error{
+                    MissingCrcBytesEos,
+                    MissingCrcBytesErr,
+                    DataWriteFail,
+                    DataReadPartial,
+                    DataReadPartialWriteFail,
+                    DataReadFail,
+                    DataReadFailWriteFail,
+                };
+                /// Returns the CRC or an error corresponding to the union tag.
+                pub fn unwrap(self: @This()) UnwrapError!u32 {
+                    return switch (self) {
+                        .ok => |ok| ok.crc,
+                        .missing_crc_bytes_eos => error.MissingCrcBytesEos,
+                        .missing_crc_bytes_err => error.MissingCrcBytesErr,
+                        .data_write_fail => error.DataWriteFail,
+                        .data_read_partial => error.DataReadPartial,
+                        .data_read_partial_write_fail => error.DataReadPartialWriteFail,
+                        .data_read_fail => error.DataReadFail,
+                        .data_read_fail_write_fail => error.DataReadFailWriteFail,
+                    };
+                }
+            };
+        }
+        pub fn streamDataWithBuffer(
+            self: *Self,
+            writer: anytype,
+            intermediate_buffer: []u8,
+        ) StreamDataResult(@TypeOf(writer).Error) {
+            const Result = StreamDataResult(@TypeOf(writer).Error);
+            const header: ChunkHeader = switch (self.state) {
+                .begin => unreachable,
+                .awaiting_header => unreachable,
+                .awaiting_data => |header| header,
+                .end => unreachable,
+            };
+
+            self.state = .end;
+            return switch (util.readIntoWriterEagerlyWithBuffer(writer, self.reader, header.length, intermediate_buffer)) {
+                .ok => switch (util.readBoundedArrayExtra(self.reader, 4)) {
+                    .ok => |bytes| switch (bytes.len) {
+                        4 => blk: {
+                            self.state = .awaiting_header;
+                            break :blk Result{ .ok = Result.Ok{
+                                .crc = std.mem.readIntBig(u32, bytes.buffer[0..]),
+                            } };
+                        },
+                        0...3 => Result{ .missing_crc_bytes_eos = Result.MissingCrcBytesEos{
+                            .bytes = std.BoundedArray(u8, 4 - 1).fromSlice(bytes.constSlice()) catch unreachable,
+                        } },
+                        else => unreachable,
+                    },
+                    .fail => |fail| Result{ .missing_crc_bytes_err = fail },
+                },
+                .write_fail => |write_fail| Result{ .data_write_fail = Result.DataWriteFail{
+                    .bytes_read = @intCast(u31, write_fail.bytes_read),
+                    .bytes_written = @intCast(u31, write_fail.bytes_written),
+                    .write_err = write_fail.write_err,
+                } },
+                .read_partial => |read_partial| Result{ .data_read_partial = Result.DataReadPartial{
+                    .bytes_read = @intCast(u31, read_partial.bytes_read),
+                } },
+                .read_partial_write_fail => |info| Result{ .data_read_partial_write_fail = Result.DataReadPartialWriteFail{
+                    .bytes_read = @intCast(u31, info.bytes_read),
+                    .bytes_written = @intCast(u31, info.bytes_written),
+                    .write_err = info.write_err,
+                } },
+                .read_fail => |read_fail| Result{ .data_read_fail = Result.DataReadFail{
+                    .bytes_read = @intCast(u31, read_fail.bytes_read),
+                    .read_err = read_fail.read_err,
+                } },
+                .read_fail_write_fail => |info| Result{ .data_read_fail_write_fail = Result.DataReadFailWriteFail{
+                    .bytes_read = @intCast(u31, info.bytes_read),
+                    .bytes_written = @intCast(u31, info.bytes_written),
+                    .read_err = info.read_err,
+                    .write_err = info.write_err,
+                } },
+            };
+        }
+    };
+}
+
+test {
+    const data = @embedFile("img1.png");
+    var data_stream = std.io.fixedBufferStream(data);
+
+    var chunk_data_stream = chunkDataStream(data_stream.reader());
+
+    var intermediate_buf_cache = std.ArrayList(u8).init(std.testing.allocator);
+    defer intermediate_buf_cache.deinit();
+
+    var raw_data_list = std.ArrayList(u8).init(std.testing.allocator);
+    defer raw_data_list.deinit();
+
+    try chunk_data_stream.start().unwrap();
+    while (chunk_data_stream.nextHeader()) |maybe_header| {
+        const header = try maybe_header.unwrap();
+
+        try intermediate_buf_cache.resize(header.length);
+
+        const current_chunk_start = raw_data_list.items.len;
+        const crc = try chunk_data_stream.streamDataWithBuffer(raw_data_list.writer(), intermediate_buf_cache.items).unwrap();
+
+        var crc_hasher = std.hash.Crc32.init();
+        crc_hasher.update(&std.mem.toBytes(header.type.intBig()));
+        crc_hasher.update(raw_data_list.items[current_chunk_start..]);
+        try std.testing.expectEqual(crc_hasher.final(), crc);
+    }
+}

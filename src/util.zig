@@ -1,9 +1,5 @@
 const std = @import("std");
 
-pub const ErrorSetFromValue = @import("util/error_memoization.zig").ErrorSetFromValue;
-pub const ErrorSetFromValues = @import("util/error_memoization.zig").ErrorSetFromValues;
-pub const MemoizeErrorSet = @import("util/error_memoization.zig").MemoizeErrorSet;
-
 const ReadAllExtraResultTag = enum { ok, fail };
 pub fn ReadAllExtraResult(comptime ErrorSet: type) type {
     return union(ReadAllExtraResultTag) {
@@ -24,8 +20,8 @@ pub fn ReadAllExtraResult(comptime ErrorSet: type) type {
         }
     };
 }
-pub fn readAllExtra(reader: anytype, buf: []u8) ReadAllExtraResult(MemoizeErrorSet(@TypeOf(reader).Error)) {
-    const Result = ReadAllExtraResult(MemoizeErrorSet(@TypeOf(reader).Error));
+pub fn readAllExtra(reader: anytype, buf: []u8) ReadAllExtraResult(@TypeOf(reader).Error) {
+    const Result = ReadAllExtraResult(@TypeOf(reader).Error);
     var index: usize = 0;
     while (index != buf.len) {
         const amt = reader.read(buf[index..]) catch |err| return Result{
@@ -44,11 +40,11 @@ pub fn ReadNoEofExtraResult(comptime ErrorSet: type) type {
         partial: usize,
         fail: Fail,
 
-        pub const Fail = ReadAllExtraResult(MemoizeErrorSet(ErrorSet)).Fail;
+        pub const Fail = ReadAllExtraResult(ErrorSet).Fail;
     };
 }
-pub fn readNoEofExtra(reader: anytype, buf: []u8) ReadNoEofExtraResult(MemoizeErrorSet(@TypeOf(reader).Error)) {
-    const Result = ReadNoEofExtraResult(MemoizeErrorSet(@TypeOf(reader).Error));
+pub fn readNoEofExtra(reader: anytype, buf: []u8) ReadNoEofExtraResult(@TypeOf(reader).Error) {
+    const Result = ReadNoEofExtraResult(@TypeOf(reader).Error);
     switch (readAllExtra(reader, buf)) {
         .ok => |bytes_read| {
             if (bytes_read < buf.len) {
@@ -59,9 +55,7 @@ pub fn readNoEofExtra(reader: anytype, buf: []u8) ReadNoEofExtraResult(MemoizeEr
         },
         .fail => |fail| {
             std.debug.assert(fail.bytes_read < buf.len);
-            return Result{ .fail = Result.Fail{
-                .err = fail.err,
-            } };
+            return Result{ .fail = fail };
         },
     }
     const amt_read = try reader.readAll(buf);
@@ -88,8 +82,8 @@ pub fn ReadBoundedArrayExtraResult(comptime ErrorSet: type, comptime byte_count:
         }
     };
 }
-pub fn readBoundedArrayExtra(reader: anytype, comptime byte_count: usize) ReadBoundedArrayExtraResult(MemoizeErrorSet(@TypeOf(reader).Error), byte_count) {
-    const Result = ReadBoundedArrayExtraResult(MemoizeErrorSet(@TypeOf(reader).Error), byte_count);
+pub fn readBoundedArrayExtra(reader: anytype, comptime byte_count: usize) ReadBoundedArrayExtraResult(@TypeOf(reader).Error, byte_count) {
+    const Result = ReadBoundedArrayExtraResult(@TypeOf(reader).Error, byte_count);
     var bounded = std.BoundedArray(u8, byte_count).init(byte_count) catch unreachable;
 
     return switch (readAllExtra(reader, bounded.slice())) {
@@ -129,8 +123,8 @@ pub fn WriteAllExtraResult(comptime ErrorSet: type) type {
         }
     };
 }
-pub fn writeAllExtra(writer: anytype, bytes: []const u8) WriteAllExtraResult(MemoizeErrorSet(@TypeOf(writer).Error)) {
-    const Result = WriteAllExtraResult(MemoizeErrorSet(@TypeOf(writer).Error));
+pub fn writeAllExtra(writer: anytype, bytes: []const u8) WriteAllExtraResult(@TypeOf(writer).Error) {
+    const Result = WriteAllExtraResult(@TypeOf(writer).Error);
     var index: usize = 0;
     while (index != bytes.len) {
         index += writer.write(bytes[index..]) catch |err| return Result{ .fail = Result.Fail{
@@ -189,19 +183,19 @@ pub fn ReadIntoWriterWithBufferEagerlyResult(
         };
     };
 }
-pub fn readIntoWriterWithBufferEagerly(
+pub fn readIntoWriterEagerlyWithBuffer(
     writer: anytype,
     reader: anytype,
     byte_count: usize,
     intermediate_buffer: []u8,
 ) ReadIntoWriterWithBufferEagerlyResult(
-    MemoizeErrorSet(@TypeOf(writer).Error),
-    MemoizeErrorSet(@TypeOf(reader).Error),
+    @TypeOf(writer).Error,
+    @TypeOf(reader).Error,
 ) {
     std.debug.assert(intermediate_buffer.len > 0 or byte_count == 0);
     const Result = ReadIntoWriterWithBufferEagerlyResult(
-        MemoizeErrorSet(@TypeOf(writer).Error),
-        MemoizeErrorSet(@TypeOf(reader).Error),
+        @TypeOf(writer).Error,
+        @TypeOf(reader).Error,
     );
 
     var count: usize = 0;
