@@ -27,8 +27,11 @@ pub fn build(b: *std.build.Builder) void {
     });
     const mode = b.standardReleaseOptions();
 
+    const no_stage1 = b.option(bool, "no-stage1", "Don't use stage1 at all.") orelse false;
+
     const main_tests = b.addTest("src/main.zig");
     main_tests.setBuildMode(mode);
+    main_tests.use_stage1 = !no_stage1;
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
