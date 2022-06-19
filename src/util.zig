@@ -1,248 +1,146 @@
 const std = @import("std");
-
-const ReadAllExtraResultTag = enum { ok, fail };
-pub fn ReadAllExtraResult(comptime ErrorSet: type) type {
-    return union(ReadAllExtraResultTag) {
-        ok: usize,
-        fail: Fail,
-
-        pub const Fail = struct {
-            err: ErrorSet,
-            /// always less than the length of the output buffer.
-            bytes_read: usize,
-        };
-
-        pub fn unwrap(result: @This()) ErrorSet!usize {
-            return switch (result) {
-                .ok => |bytes_read| bytes_read,
-                .fail => |fail| fail.err,
-            };
-        }
-    };
-}
-pub fn readAllExtra(reader: anytype, buf: []u8) ReadAllExtraResult(@TypeOf(reader).Error) {
-    const Result = ReadAllExtraResult(@TypeOf(reader).Error);
+pub fn writeAllExtra(
+    writer: anytype,
+    bytes: []const u8,
+    /// Assumed to be initialised. Recommended value of 0.
+    /// Will have the number of bytes which are ultimately written to the stream
+    /// added to it.
+    p_count: *usize,
+) @TypeOf(writer).Error!void {
     var index: usize = 0;
-    while (index != buf.len) {
-        const amt = reader.read(buf[index..]) catch |err| return Result{
-            .fail = Result.Fail{ .err = err, .bytes_read = index },
-        };
-        if (amt == 0) break;
+    defer p_count.* += index;
+
+    while (index != bytes.len) {
+        const amt = try writer.write(bytes[index..]);
+        std.debug.assert(0 < amt and index + amt <= bytes.len);
         index += amt;
     }
-    return Result{ .ok = index };
 }
 
-const ReadNoEofExtraResultTag = enum { ok, partial, fail };
-pub fn ReadNoEofExtraResult(comptime ErrorSet: type) type {
-    return union(ReadNoEofExtraResultTag) {
-        ok,
-        partial: usize,
-        fail: Fail,
-
-        pub const Fail = ReadAllExtraResult(ErrorSet).Fail;
-    };
-}
-pub fn readNoEofExtra(reader: anytype, buf: []u8) ReadNoEofExtraResult(@TypeOf(reader).Error) {
-    const Result = ReadNoEofExtraResult(@TypeOf(reader).Error);
-    switch (readAllExtra(reader, buf)) {
-        .ok => |bytes_read| {
-            if (bytes_read < buf.len) {
-                return Result{ .partial = bytes_read };
-            }
-            std.debug.assert(bytes_read == buf.len);
-            return .ok;
-        },
-        .fail => |fail| {
-            std.debug.assert(fail.bytes_read < buf.len);
-            return Result{ .fail = fail };
-        },
-    }
-    const amt_read = try reader.readAll(buf);
-    if (amt_read < buf.len) return error.EndOfStream;
-}
-
-const ReadBoundedArrayExtraResultTag = enum { ok, fail };
-pub fn ReadBoundedArrayExtraResult(comptime ErrorSet: type, comptime byte_count: usize) type {
-    return union(ReadBoundedArrayExtraResultTag) {
-        ok: std.BoundedArray(u8, byte_count),
-        fail: Fail,
-
-        pub const Fail = struct {
-            bytes: Bytes,
-            err: ErrorSet,
-            pub const Bytes = std.BoundedArray(u8, @maximum(byte_count, 1) - 1);
-        };
-
-        pub fn unwrap(self: @This()) ErrorSet!std.BoundedArray(u8, byte_count) {
-            return switch (self) {
-                .ok => |value| value,
-                .fail => |fail| fail.err,
-            };
-        }
-    };
-}
-pub fn readBoundedArrayExtra(reader: anytype, comptime byte_count: usize) ReadBoundedArrayExtraResult(@TypeOf(reader).Error, byte_count) {
-    const Result = ReadBoundedArrayExtraResult(@TypeOf(reader).Error, byte_count);
-    var bounded = std.BoundedArray(u8, byte_count).init(byte_count) catch unreachable;
-
-    return switch (readAllExtra(reader, bounded.slice())) {
-        .ok => |bytes_read| blk: {
-            std.debug.assert(bytes_read <= byte_count);
-            bounded.resize(bytes_read) catch unreachable;
-            break :blk Result{ .ok = bounded };
-        },
-        .fail => |fail| blk: {
-            std.debug.assert(fail.bytes_read < byte_count);
-            bounded.resize(fail.bytes_read) catch unreachable;
-            break :blk Result{ .fail = Result.Fail{
-                .bytes = Result.Fail.Bytes.fromSlice(bounded.constSlice()) catch unreachable,
-                .err = fail.err,
-            } };
-        },
-    };
-}
-
-const WriteAllExtraResultTag = enum { ok, fail };
-pub fn WriteAllExtraResult(comptime ErrorSet: type) type {
-    return union(WriteAllExtraResultTag) {
-        ok,
-        fail: Fail,
-
-        pub const Fail = struct {
-            err: ErrorSet,
-            /// always less than the length of the input buffer.
-            bytes_written: usize,
-        };
-
-        pub fn unwrap(result: @This()) ErrorSet!void {
-            return switch (result) {
-                .ok => {},
-                .fail => |fail| fail.err,
-            };
-        }
-    };
-}
-pub fn writeAllExtra(writer: anytype, bytes: []const u8) WriteAllExtraResult(@TypeOf(writer).Error) {
-    const Result = WriteAllExtraResult(@TypeOf(writer).Error);
-    var index: usize = 0;
-    while (index != bytes.len) {
-        index += writer.write(bytes[index..]) catch |err| return Result{ .fail = Result.Fail{
-            .err = err,
-            .bytes_written = index,
-        } };
-    }
-    return .ok;
-}
-
-pub fn ReadIntoWriterWithBufferEagerlyResult(
-    comptime WriteError: type,
-    comptime ReadError: type,
-) type {
-    return union(enum) {
-        /// Read the full number of requested bytes successfully,
-        /// and wrote all those bytes successfully.
-        ok,
-        /// Encountered an error trying to write the successfully read bytes.
-        write_fail: WriteFail,
-        /// Encountered end of stream before reading the specified number
-        /// of bytes, but managed to successfully write those which were acquired.
-        read_partial: ReadPartial,
-        /// Encountered end of stream before reading the specified number
-        /// of bytes, and then failed to fully write those which were acquired.
-        read_partial_write_fail: ReadPartialWriteFail,
-        /// Encountered error before reading the specified number of bytes,
-        /// but managed to successfully write this which were acquired.
-        read_fail: ReadFail,
-        /// Encountered error before reading the specified number of bytes,
-        /// and then failed to fully wrote those which were acquired.
-        read_fail_write_fail: ReadFailWriteFail,
-
-        pub const WriteFail = struct {
-            bytes_read: usize,
-            bytes_written: usize,
-            write_err: WriteError,
-        };
-        pub const ReadPartial = struct {
-            bytes_read: usize,
-        };
-        pub const ReadPartialWriteFail = struct {
-            bytes_read: usize,
-            bytes_written: usize,
-            write_err: WriteError,
-        };
-        pub const ReadFail = struct {
-            bytes_read: usize,
-            read_err: ReadError,
-        };
-        pub const ReadFailWriteFail = struct {
-            bytes_read: usize,
-            bytes_written: usize,
-            read_err: ReadError,
-            write_err: WriteError,
-        };
-    };
-}
-pub fn readIntoWriterEagerlyWithBuffer(
-    writer: anytype,
+pub fn readAllExtra(
     reader: anytype,
-    byte_count: usize,
-    intermediate_buffer: []u8,
-) ReadIntoWriterWithBufferEagerlyResult(
-    @TypeOf(writer).Error,
-    @TypeOf(reader).Error,
-) {
-    std.debug.assert(intermediate_buffer.len > 0 or byte_count == 0);
-    const Result = ReadIntoWriterWithBufferEagerlyResult(
-        @TypeOf(writer).Error,
-        @TypeOf(reader).Error,
-    );
+    buffer: []u8,
+    /// Assumed to be initialised. Recommended value of 0.
+    /// Will have the number of bytes which are ultimately read into the buffer
+    /// added to it.
+    p_count: *usize,
+) @TypeOf(reader).Error!void {
+    var index: usize = 0;
+    defer p_count.* += index;
 
-    var count: usize = 0;
-    while (count < byte_count) {
-        const amt = std.math.min(byte_count - count, intermediate_buffer.len);
-        switch (readNoEofExtra(reader, intermediate_buffer[0..amt])) {
-            .ok => switch (writeAllExtra(writer, intermediate_buffer[0..amt])) {
-                .ok => count += amt,
-                .fail => |write_fail| {
-                    std.debug.assert(write_fail.bytes_written < amt);
-                    return Result{ .write_fail = Result.WriteFail{
-                        .bytes_read = count + amt,
-                        .bytes_written = count + write_fail.bytes_written,
-                        .write_err = write_fail.err,
-                    } };
+    while (index != buffer.len) {
+        const amt = try reader.read(buffer[index..]);
+
+        if (amt == 0) break;
+        index += amt;
+
+        std.debug.assert(index <= buffer.len);
+    }
+}
+
+/// Asserts `byte_count <= p_bounded_array.capacity()`.
+pub fn readBoundedArray(
+    reader: anytype,
+    /// Must be `*std.BoundedArray(u8, n)`, for any `n`.
+    p_bounded_array: anytype,
+    /// Number of bytes to read into the bounded array.
+    byte_count: usize,
+) (@TypeOf(reader).Error!void) {
+    comptime {
+        const lazy = struct {
+            const compile_err = @compileError("Expected a `*std.BoundedArray(u8, n)`, for any `n`, but instead found `" ++ @typeName(@TypeOf(p_bounded_array)) ++ "`.");
+        };
+        switch (@typeInfo(@TypeOf(p_bounded_array))) {
+            .Pointer => |info| switch (info.size) {
+                .One => {
+                    const buffer_field_index = std.meta.fieldIndex(info.child, .buffer) orelse lazy.compile_err;
+                    const capacity = @typeInfo(@typeInfo(info.child).Struct.fields[buffer_field_index].field_type).Array.len;
+                    if (info.child != std.BoundedArray(u8, capacity)) lazy.compile_err;
                 },
+                else => lazy.compile_err,
             },
-            .partial => |bytes_read| {
-                std.debug.assert(bytes_read < amt);
-                return switch (writeAllExtra(writer, intermediate_buffer[0..bytes_read])) {
-                    .ok => Result{ .read_partial = Result.ReadPartial{
-                        .bytes_read = count + bytes_read,
-                    } },
-                    .fail => |write_fail| Result{ .read_partial_write_fail = Result.ReadPartialWriteFail{
-                        .bytes_read = count + bytes_read,
-                        .bytes_written = count + write_fail.bytes_written,
-                        .write_err = write_fail.err,
-                    } },
-                };
-            },
-            .fail => |read_fail| {
-                std.debug.assert(read_fail.bytes_read < amt);
-                return switch (writeAllExtra(writer, intermediate_buffer[0..read_fail.bytes_read])) {
-                    .ok => Result{ .read_fail = Result.ReadFail{
-                        .bytes_read = count + read_fail.bytes_read,
-                        .read_err = read_fail.err,
-                    } },
-                    .fail => |write_fail| Result{ .read_fail_write_fail = Result.ReadFailWriteFail{
-                        .bytes_read = count + read_fail.bytes_read,
-                        .bytes_written = count + write_fail.bytes_written,
-                        .read_err = read_fail.err,
-                        .write_err = write_fail.err,
-                    } },
-                };
-            },
+            else => lazy.compile_err,
         }
     }
 
-    return .ok;
+    std.debug.assert(byte_count <= p_bounded_array.capacity());
+    p_bounded_array.resize(byte_count) catch unreachable;
+    try reader.readAll(p_bounded_array.slice());
+}
+
+pub const ReadIntoWriterWithBufferOutParam = struct {
+    /// Assumed to be initialised. Recommended value of 0.
+    /// Will have the number of bytes which are ultimately read from the reader stream
+    /// added to it.
+    p_count_read: *usize,
+    /// Assumed to be initialised. Recommended value of 0.
+    /// Will have the number of bytes which are ultimately written to the writer stream
+    /// added to it.
+    p_count_written: *usize,
+};
+pub fn readIntoWriterWithBuffer(
+    writer: std.io.Writer(),
+    reader: std.io.Reader(),
+    buffer: []u8,
+    byte_count: usize,
+    out: ReadIntoWriterWithBufferOutParam,
+) @TypeOf(reader).Error!(@TypeOf(writer).Error!void) {
+    var index: usize = 0;
+
+    var index_read: usize = 0;
+    defer out.p_count_read.* += index_read;
+
+    var index_written: usize = 0;
+    defer out.p_count_written.* += index_written;
+
+    while (index != byte_count) {
+        const read_amt = std.math.min(buffer.len, byte_count - index);
+        const read_start = index_read;
+
+        try readAllExtra(reader, buffer[0..read_amt], &index_read);
+
+        const write_amt = index_read - read_start;
+        const write_start = index_written;
+
+        try writeAllExtra(writer, buffer[0..write_amt], &index_written);
+        std.debug.assert((index_written - write_start) == write_amt);
+
+        if (write_amt == 0) return;
+    }
+}
+
+pub fn delimitedReader(reader: anytype, max_bytes: u64) DelimitedReader(@TypeOf(reader)) {
+    return .{
+        .inner_reader = reader,
+        .bytes_left = max_bytes,
+    };
+}
+/// Returns 'error.EndOfStream' after having read out 'max_bytes' bytes.
+pub fn DelimitedReader(comptime InnerReader: type) type {
+    return struct {
+        const Self = @This();
+        inner_reader: InnerReader,
+        bytes_left: u64,
+
+        pub const Reader = std.io.Reader(*Self, Error || InnerReader.Error, Self.read);
+        pub const Error = error{EndOfStream};
+
+        pub fn read(self: *Self, buffer: []u8) (Error || InnerReader.Error)!usize {
+            if (self.bytes_left == 0) return Error.EndOfStream;
+            const max_read = std.math.min(self.bytes_left, buffer.len);
+            const amt = try self.inner_reader.read(buffer[0..max_read]);
+            self.bytes_left -= amt;
+            return amt;
+        }
+        pub fn reader(self: *Self) Reader {
+            return Reader{ .context = self };
+        }
+    };
+}
+
+/// Ugly work around for the fact that you can't coerce to `A!B!T` from `B` or `B!T` in-place (using `@as`),
+/// e.g. `@as(A!B!T, @as(B!T, B.B))` fails to compile, but succeeds if the coercion to `B!T` is moved out into a separate identifier,
+/// and then coerced to `A!B!T`.
+pub inline fn as(comptime T: type, value: T) T {
+    return value;
 }
