@@ -68,32 +68,6 @@ pub fn readBoundedArray(
     try reader.readAll(p_bounded_array.slice());
 }
 
-/// Returns the number of bytes written.
-pub fn readIntoWriterWithBuffer(
-    writer: anytype,
-    reader: anytype,
-    buffer: []u8,
-    byte_count: usize,
-) @TypeOf(reader).Error!(@TypeOf(writer).Error!usize) {
-    const WriteErr = @TypeOf(writer).Error;
-    var index_read: usize = 0;
-    var index_written: usize = 0;
-
-    while (index_written != byte_count) {
-        const read_amt = std.math.min(buffer.len, byte_count - index_read);
-        const read_start = index_read;
-
-        readAllExtra(reader, buffer[0..read_amt], &index_read) catch |err| return @as(WriteErr!usize, err);
-
-        const write_amt = index_read - read_start;
-        const write_start = index_written;
-
-        if (write_amt == 0) return index_written;
-        try writeAllExtra(writer, buffer[0..write_amt], &index_written);
-        std.debug.assert((index_written - write_start) == write_amt);
-    }
-}
-
 pub fn delimitedReader(reader: anytype, max_bytes: u64) DelimitedReader(@TypeOf(reader)) {
     return .{
         .inner_reader = reader,
