@@ -100,3 +100,32 @@ pub const ChunkType = enum(u32) {
     }
 };
 
+pub const ChunkHeader = struct {
+    length: u31,
+    type: ChunkType,
+
+    /// Returns `null` if the reader supplies insufficient bytes.
+    pub fn parseReader(reader: anytype) ?@TypeOf(reader).Error!(ParseBytesError!ChunkHeader) {
+        var bytes: [8]u8 = undefined;
+        const count = try reader.readAll(bytes[0..]);
+
+        if (count < bytes.len) return null;
+        std.debug.assert(count == bytes.len);
+
+        return util.as(ParseBytesError!ChunkHeader, parseBytes(bytes[0..]));
+    }
+
+    pub const ParseBytesError = error{ InvalidChunkType, InvalidLength };
+    pub fn parseBytes(bytes: *const [8]u8) ParseBytesError!ChunkHeader {
+        const length = std.mem.readIntBig(u32, bytes[0..4]);
+        const @"type" = ChunkType.fromInt(std.mem.readIntBig(u32, bytes[4..]));
+        if (!@"type".isValid()) {
+            return error.InvalidChunkType;
+        }
+
+        return ChunkHeader{
+            .length = std.math.cast(u31, length) orelse return error.InvalidLength,
+            .type = @"type",
+        };
+    }
+};
