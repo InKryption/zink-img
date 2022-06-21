@@ -68,44 +68,29 @@ pub fn readBoundedArray(
     try reader.readAll(p_bounded_array.slice());
 }
 
-pub const ReadIntoWriterWithBufferOutParam = struct {
-    /// Assumed to be initialised. Recommended value of 0.
-    /// Will have the number of bytes which are ultimately read from the reader stream
-    /// added to it.
-    p_count_read: *usize,
-    /// Assumed to be initialised. Recommended value of 0.
-    /// Will have the number of bytes which are ultimately written to the writer stream
-    /// added to it.
-    p_count_written: *usize,
-};
+/// Returns the number of bytes written.
 pub fn readIntoWriterWithBuffer(
-    writer: std.io.Writer(),
-    reader: std.io.Reader(),
+    writer: anytype,
+    reader: anytype,
     buffer: []u8,
     byte_count: usize,
-    out: ReadIntoWriterWithBufferOutParam,
-) @TypeOf(reader).Error!(@TypeOf(writer).Error!void) {
-    var index: usize = 0;
-
+) @TypeOf(reader).Error!(@TypeOf(writer).Error!usize) {
+    const WriteErr = @TypeOf(writer).Error;
     var index_read: usize = 0;
-    defer out.p_count_read.* += index_read;
-
     var index_written: usize = 0;
-    defer out.p_count_written.* += index_written;
 
-    while (index != byte_count) {
-        const read_amt = std.math.min(buffer.len, byte_count - index);
+    while (index_written != byte_count) {
+        const read_amt = std.math.min(buffer.len, byte_count - index_read);
         const read_start = index_read;
 
-        try readAllExtra(reader, buffer[0..read_amt], &index_read);
+        readAllExtra(reader, buffer[0..read_amt], &index_read) catch |err| return @as(WriteErr!usize, err);
 
         const write_amt = index_read - read_start;
         const write_start = index_written;
 
+        if (write_amt == 0) return index_written;
         try writeAllExtra(writer, buffer[0..write_amt], &index_written);
         std.debug.assert((index_written - write_start) == write_amt);
-
-        if (write_amt == 0) return;
     }
 }
 
