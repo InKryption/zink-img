@@ -5,7 +5,7 @@ const util = @import("util.zig");
 pub const signature: [8]u8 = .{ 137, 80, 78, 71, 13, 10, 26, 10 };
 
 pub const CheckForPngSignatureError = error{ InsufficientBytes, InvalidBytes };
-pub fn checkForPngSignature(reader: anytype) @TypeOf(reader).Error!(CheckForPngSignatureError!void) {
+pub fn checkForPngSignature(reader: anytype) @TypeOf(reader).Error!CheckForPngSignatureError!void {
     const ReadError = (@TypeOf(reader).Error);
     const Inner = CheckForPngSignatureError!void;
 
@@ -105,14 +105,23 @@ pub const ChunkHeader = struct {
     type: ChunkType,
 
     /// Returns `null` if the reader supplies insufficient bytes.
-    pub fn parseReader(reader: anytype) ?@TypeOf(reader).Error!(ParseBytesError!ChunkHeader) {
+    pub const ParseReaderError = error{ InsufficientBytes, InvalidChunkType, InvalidLength };
+    pub fn parseReader(reader: anytype) @TypeOf(reader).Error!(ParseReaderError!ChunkHeader) {
+        const Inner = ParseReaderError!ChunkHeader;
+
         var bytes: [8]u8 = undefined;
         const count = try reader.readAll(bytes[0..]);
 
-        if (count < bytes.len) return null;
+        if (count < bytes.len) {
+            return comptime util.as(Inner, error.InsufficientBytes);
+        }
         std.debug.assert(count == bytes.len);
 
-        return util.as(ParseBytesError!ChunkHeader, parseBytes(bytes[0..]));
+        const result = parseBytes(bytes[0..]) catch |err| return switch (err) {
+            error.InvalidChunkType => comptime util.as(Inner, error.InvalidChunkType),
+            error.InvalidLength => comptime util.as(Inner, error.InvalidLength),
+        };
+        return result;
     }
 
     pub const ParseBytesError = error{ InvalidChunkType, InvalidLength };
@@ -128,4 +137,26 @@ pub const ChunkHeader = struct {
             .type = @"type",
         };
     }
+
+    pub fn toBytes(self: ChunkHeader) [8]u8 {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeIntBig(u32, bytes[0..4], self.length);
+        std.mem.writeIntBig(u32, bytes[4..], self.type.int());
+        return bytes;
+    }
 };
+
+test "ChunkHeader" {
+    const header = ChunkHeader{
+        .length = 13,
+        .type = .IHDR,
+    };
+    const bytes = header.toBytes();
+    try std.testing.expectEqual(header, try ChunkHeader.parseBytes(&bytes));
+
+    var fbs = std.io.fixedBufferStream(&bytes);
+    try std.testing.expectEqual(header, try (ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {}));
+
+    fbs = std.io.fixedBufferStream("");
+    try std.testing.expectError(error.InsufficientBytes, ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {});
+}
