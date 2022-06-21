@@ -105,7 +105,7 @@ pub const ChunkHeader = struct {
     type: ChunkType,
 
     /// Returns `null` if the reader supplies insufficient bytes.
-    pub const ParseReaderError = error{ InsufficientBytes, InvalidChunkType, InvalidLength };
+    pub const ParseReaderError = ParseBytesError || error{ InsufficientBytes, InvalidLength, InvalidChunkType };
     pub fn parseReader(reader: anytype) @TypeOf(reader).Error!(ParseReaderError!ChunkHeader) {
         const Inner = ParseReaderError!ChunkHeader;
 
@@ -117,23 +117,22 @@ pub const ChunkHeader = struct {
         }
         std.debug.assert(count == bytes.len);
 
-        const result = parseBytes(bytes[0..]) catch |err| return switch (err) {
-            error.InvalidChunkType => comptime util.as(Inner, error.InvalidChunkType),
+        return parseBytes(bytes[0..]) catch |err| switch (err) {
             error.InvalidLength => comptime util.as(Inner, error.InvalidLength),
+            error.InvalidChunkType => comptime util.as(Inner, error.InvalidChunkType),
         };
-        return result;
     }
 
     pub const ParseBytesError = error{ InvalidChunkType, InvalidLength };
     pub fn parseBytes(bytes: *const [8]u8) ParseBytesError!ChunkHeader {
-        const length = std.mem.readIntBig(u32, bytes[0..4]);
+        const length = std.math.cast(u31, std.mem.readIntBig(u32, bytes[0..4])) orelse return error.InvalidLength;
         const @"type" = ChunkType.fromInt(std.mem.readIntBig(u32, bytes[4..]));
         if (!@"type".isValid()) {
             return error.InvalidChunkType;
         }
 
         return ChunkHeader{
-            .length = std.math.cast(u31, length) orelse return error.InvalidLength,
+            .length = length,
             .type = @"type",
         };
     }
@@ -154,9 +153,28 @@ test "ChunkHeader" {
     const bytes = header.toBytes();
     try std.testing.expectEqual(header, try ChunkHeader.parseBytes(&bytes));
 
-    var fbs = std.io.fixedBufferStream(&bytes);
-    try std.testing.expectEqual(header, try (ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {}));
-
-    fbs = std.io.fixedBufferStream("");
+    var fbs = std.io.fixedBufferStream("");
     try std.testing.expectError(error.InsufficientBytes, ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {});
+
+    read_error: {
+        var i: u8 = 0;
+        const garbage = [_]u8{0xff} ** 8;
+        while (i < garbage.len) : (i += 1) {
+            fbs = std.io.fixedBufferStream(garbage[0..]);
+            try std.testing.expectError(error.EndOfStream, blk: {
+                var delimited = util.delimitedReader(fbs.reader(), i);
+                break :blk ChunkHeader.parseReader(delimited.reader());
+            });
+        }
+        break :read_error;
+    }
+
+    fbs = std.io.fixedBufferStream(&[_]u8{0xff} ** 8);
+    try std.testing.expectError(error.InvalidLength, (ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {}));
+
+    fbs = std.io.fixedBufferStream(header.toBytes()[0..4] ++ [_]u8{0xff} ** 8);
+    try std.testing.expectError(error.InvalidChunkType, (ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {}));
+
+    fbs = std.io.fixedBufferStream(&bytes);
+    try std.testing.expectEqual(header, (ChunkHeader.parseReader(fbs.reader()) catch |err| switch (err) {}) catch @panic("That wasn't supposed to happen.\n"));
 }
